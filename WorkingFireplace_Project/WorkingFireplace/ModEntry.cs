@@ -23,6 +23,9 @@ using StardewValley.Locations;
 using StardewValley.Objects;
 using StardewValley.Characters;
 using StardewValley.BellsAndWhistles;
+using System.Threading;
+using System.Runtime.CompilerServices;
+using Harmony;
 
 //using StardewValley.Menus;
 //using System.Collections.Generic;
@@ -44,9 +47,25 @@ namespace WorkingFireplace
         {
             Config = helper.ReadConfig<WorkingFireplaceConfig>();
 
-            helper.Events.Input.ButtonPressed += Input_ButtonPressed;
+            FurniturePatch.Initialize(Monitor, Config, Helper);
+            ApplyHarmonyPatches();
+
+            //helper.Events.Input.ButtonPressed += Input_ButtonPressed;
             helper.Events.GameLoop.DayStarted += GameLoop_DayStarted;
             helper.Events.Display.MenuChanged += Display_MenuChanged;
+        }
+
+        /// <summary>Apply harmony patches for turning the fireplace on and off.</summary>
+        private void ApplyHarmonyPatches()
+        {
+            // create a new Harmony instance for patching source code
+            HarmonyInstance harmony = HarmonyInstance.Create(this.ModManifest.UniqueID);
+
+            // apply the patch
+            harmony.Patch(
+                original: AccessTools.Method(typeof(StardewValley.Objects.Furniture), "checkForAction"),
+                prefix: new HarmonyMethod(AccessTools.Method(typeof(FurniturePatch), nameof(FurniturePatch.checkForAction_Prefix)))
+            );
         }
 
         void Display_MenuChanged(object sender, MenuChangedEventArgs e)
@@ -142,38 +161,6 @@ namespace WorkingFireplace
 
         private bool HasSpouse() => GetSpouse() != null;
         private NPC GetSpouse() => Game1.player.getSpouse();
-
-        void Input_ButtonPressed(object sender, ButtonPressedEventArgs e)
-        {
-            Point grabtile = VectorToPoint(e.Cursor.GrabTile);
-
-            if (Game1.currentLocation is FarmHouse farmHouse1 && Game1.activeClickableMenu == null &&
-                e.Button.IsUseToolButton() && e.IsDown(e.Button))
-            {
-                //the fireplace is moved. We want to turn it off to avoid floating flames.
-                Point tile = VectorToPoint(e.Cursor.Tile);
-                SetFireplace(farmHouse1, tile.X, tile.Y, false, true);
-            }
-            else if (Game1.currentLocation is FarmHouse farmHouse && Game1.activeClickableMenu == null &&
-                e.Button.IsActionButton() && e.IsDown(e.Button) &&
-                farmHouse.getObjectAtTile(grabtile.X, grabtile.Y) is Furniture furniture &&
-                furniture.furniture_type == Furniture.fireplace)
-            {
-                Helper.Input.Suppress(e.Button);
-
-                if (!furniture.isOn)
-                {
-                    Item item = Game1.player.CurrentItem;
-                    if (item != null && item.Name == "Wood" && item.Stack >= Config.wood_pieces)
-                    {
-                        Game1.player.removeItemsFromInventory(item.ParentSheetIndex, Config.wood_pieces);
-                        SetFireplace(farmHouse, grabtile.X, grabtile.Y, true);
-                        return;
-                    }
-                    Game1.showRedMessage(Helper.Translation.Get("msg.nowood", new { Config.wood_pieces }));
-                }
-            }
-        }
 
         private bool WarmInside(bool changeFireplace)
         {
@@ -295,6 +282,64 @@ namespace WorkingFireplace
         {
             return new Point(Convert.ToInt32(vec.X), Convert.ToInt32(vec.Y));
         }
+    }
 
+    internal class FurniturePatch
+    {
+        private static IMonitor Monitor;
+        private static WorkingFireplaceConfig Config;
+        private static IModHelper Helper;
+
+        // call this method from the Entry class
+        public static void Initialize(IMonitor monitor, WorkingFireplaceConfig config, IModHelper helper)
+        {
+            Monitor = monitor;
+            Config = config;
+            Helper = helper;
+        }
+
+        /// <summary>This code replaces game code, it runs when the game checks for possible player actions on an item of furniture.</summary>
+        /// <param name="who">The current player.</param>
+        /// <param name="__instance">Furniture object the player is interacting with.</param>
+        /// <returns>If not a fireplace, returns true (This means the actual game code will run). If a fireplace set to off, with sufficient wood to light a fire, it will subtract wood from inventory and return true (Game code will run). If a fireplace set to on, or insufficient wood to light a fire, return false (Actual game code will not run.)</returns>
+        internal static bool checkForAction_Prefix(Farmer who, StardewValley.Objects.Furniture __instance)
+        {
+            try
+            {
+                if (__instance.furniture_type == Furniture.fireplace) // is Fireplace
+                {
+                    if (__instance.isOn) // fireplace is on
+                    {
+                        Monitor.Log("Action to turn fireplace off was suppressed.", LogLevel.Debug);
+                        return false; // Suppress action to turn the fireplace off.
+                    }
+                    else
+                    {
+                        Item item = who.CurrentItem;
+                        if (item != null && item.Name == "Wood" && item.Stack >= Config.wood_pieces) // At least X wood in inventory
+                        {
+                            who.removeItemsFromInventory(item.ParentSheetIndex, Config.wood_pieces);
+                            Monitor.Log("Fireplace turned on.", LogLevel.Debug);
+                            return true; // Allow action to light the fireplace.
+                        }
+                        else
+                        {
+                            Game1.showRedMessage(Helper.Translation.Get("msg.nowood", new { Config.wood_pieces }));
+                            Monitor.Log("No wood; fireplace could not be turned on.", LogLevel.Debug);
+                            return false; // Insufficient wood; suppress action to light the fireplace.
+                        }
+                    }
+                }
+                else 
+                {
+                    return true; // Not a fireplace; run original logic
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"Failed in {nameof(checkForAction_Prefix)}:\n{ex}", LogLevel.Error);
+                return true; // run original logic
+            }
+        }
     }
 }
